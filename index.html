@@ -1,256 +1,101 @@
-<!doctype html>
-<html lang="id">
+<!DOCTYPE html>
+<html>
 <head>
-<meta charset="utf-8" />
-<title>Label Check PIRT — Improved</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
-<style>
-  body{font-family:system-ui,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#222}
-  h1{color:#0b66c3}
-  .row{display:flex;gap:12px;align-items:center}
-  .box{border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-top:14px}
-  .btn{display:inline-block;background:#0b66c3;color:#fff;padding:8px 14px;border-radius:6px;text-decoration:none}
-  .fail{color:#b91c1c} .ok{color:#15803d}
-  pre{white-space:pre-wrap;font-family:monospace}
-  small{color:#666}
-</style>
+  <meta charset="UTF-8">
+  <title>Label Check | Dinas Kesehatan</title>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
 </head>
 <body>
-  <h1>Label Check PIRT (improved)</h1>
-  <p>Upload foto label — sistem akan mencoba mendeteksi <b>Nama Produk</b> (huruf terbesar), <b>Nama Dagang</b> (baris paling atas), dan <b>Produsen</b>. Jika informasi kurang, akan tampil tombol untuk edit di Canva.</p>
 
-  <div class="row">
-    <input type="file" id="upload" accept="image/*">
-    <button id="process" class="btn">Proses OCR</button>
-    <a id="canva" class="btn" href="https://www.canva.com/design/create" target="_blank" style="background:#ff007b;display:none">Edit di Canva</a>
-  </div>
+<h2>Cek Label Pangan Otomatis</h2>
+<p>Upload foto label, sistem akan membaca isi teks dan menilai kelengkapannya.</p>
 
-  <div class="box">
-    <h3>Preview hasil OCR</h3>
-    <div id="imgPreview" style="max-width:100%;margin-bottom:8px"></div>
-    <pre id="raw" style="min-height:60px"></pre>
-  </div>
+<input type="file" accept="image/*" id="upload" />
 
-  <div id="analysis" class="box" style="display:none"></div>
+<pre id="output"></pre>
+<div id="result"></div>
 
 <script>
-// ---------- Helper: preprocessing (scale + greyscale + simple threshold) ----------
-function preprocessFile(file, scale=2) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(200, Math.round(img.width * scale));
-      canvas.height = Math.max(200, Math.round(img.height * scale));
-      const ctx = canvas.getContext('2d');
+document.getElementById('upload').addEventListener('change', function() {
+    const file = this.files[0];
+    if (!file) return;
 
-      // draw and increase contrast
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    Tesseract.recognize(
+        file,
+        'eng',
+        { logger: m => console.log(m) }
+    ).then(({ data: { text } }) => {
 
-      // grayscale
-      const d = ctx.getImageData(0,0,canvas.width,canvas.height);
-      const data = d.data;
-      for (let i=0;i<data.length;i+=4){
-        const r=data[i], g=data[i+1], b=data[i+2];
-        const gray = 0.299*r + 0.587*g + 0.114*b;
-        data[i]=data[i+1]=data[i+2]=gray;
-      }
-      ctx.putImageData(d,0,0);
+        // Tampilkan full hasil OCR
+        document.getElementById('output').innerText = text;
 
-      // simple adaptive-like threshold: local mean on small blocks
-      const block = 20;
-      const imgData = ctx.getImageData(0,0,canvas.width,canvas.height);
-      const px = imgData.data;
-      for (let by=0; by<canvas.height; by+=block){
-        for (let bx=0; bx<canvas.width; bx+=block){
-          let sum=0, cnt=0;
-          for (let y=by; y<Math.min(by+block,canvas.height); y++){
-            for (let x=bx; x<Math.min(bx+block,canvas.width); x++){
-              const i = (y*canvas.width + x)*4;
-              sum += px[i];
-              cnt++;
-            }
-          }
-          const mean = sum / Math.max(1,cnt);
-          for (let y=by; y<Math.min(by+block,canvas.height); y++){
-            for (let x=bx; x<Math.min(bx+block,canvas.width); x++){
-              const i = (y*canvas.width + x)*4;
-              const val = px[i] < mean-10 ? 0 : 255;
-              px[i]=px[i+1]=px[i+2]=val;
-            }
-          }
+        // ================================
+        // PROSES DETEKSI BARIS
+        // ================================
+        const lines = text
+            .split("\n")
+            .map(l => l.trim())
+            .filter(l => l.length > 2);
+
+        let namaDagang = "Tidak ditemukan";
+        let namaProduk = "Tidak ditemukan";
+
+        // --- 1. Nama Dagang = baris paling atas ---
+        if (lines.length > 0) {
+            namaDagang = lines[0];
         }
-      }
-      ctx.putImageData(imgData,0,0);
 
-      canvas.toBlob(b => resolve({blob:b, dataUrl:canvas.toDataURL()}), 'image/png', 0.9);
-    };
-    img.onerror = reject;
-    img.src = URL.createObjectURL(file);
-  });
-}
+        // --- 2. Nama Produk = baris paling panjang yang bukan angka atau kata kecil ---
+        let kemungkinanProduk = lines.filter(l =>
+            l.length > 5 &&
+            !/komposisi|diproduksi|alamat|netto|p-?irt|exp|kedaluwarsa|bpom/i.test(l) &&
+            !/^\d+$/.test(l)
+        );
 
-// ---------- Helper: extract bounding box robustly ----------
-function bboxFrom(item) {
-  // Tesseract.js may return .bbox as array [x0,y0,x1,y1] or object {x0,y0,x1,y1}
-  if (!item) return null;
-  if (item.bbox) {
-    const b = item.bbox;
-    if (Array.isArray(b)) return {x0:b[0], y0:b[1], x1:b[2], y1:b[3]};
-    if (typeof b === 'object') return {x0:b.x0||b.x1||0, y0:b.y0||b.y1||0, x1:b.x1||b.x2||0, y1:b.y1||b.y2||0};
-  }
-  if (item.box && Array.isArray(item.box)) {
-    const b = item.box; return {x0:b[0],y0:b[1],x1:b[2],y1:b[3]};
-  }
-  // fallback: try geometry
-  if (item.x0!==undefined && item.y0!==undefined && item.x1!==undefined && item.y1!==undefined) {
-    return {x0:item.x0,y0:item.y0,x1:item.x1,y1:item.y1};
-  }
-  return null;
-}
+        if (kemungkinanProduk.length > 0) {
+            // Ambil baris dengan karakter terbanyak (paling besar biasanya)
+            kemungkinanProduk.sort((a, b) => b.length - a.length);
+            namaProduk = kemungkinanProduk[0];
+        }
 
-// ---------- Heuristik pengecualian ----------
-function looksLikePirt(line) {
-  if(!line) return false;
-  return /p[\s\-]*irt|no\.?\s*pirt|nomor\s*pirt|nomor:\s*pirt/i.test(line);
-}
-function mostlyDigits(s) {
-  const digits = (s.match(/\d/g)||[]).length;
-  return digits / Math.max(1, s.replace(/\s/g,'').length) > 0.6;
-}
+        // ================================
+        // DETEKSI KOMPONEN WAJIB
+        // ================================
+        const wajib = {
+            "Nama Dagang": namaDagang,
+            "Nama Produk": namaProduk,
+            "Komposisi": /komposisi/i.test(text),
+            "Netto": /netto|berat bersih/i.test(text),
+            "PIRT": /p-irt|pirt|p\.irt/i.test(text),
+            "Produsen": /diproduksi oleh|produsen|oleh/i.test(text),
+            "Alamat Produsen": /alamat produsen|jl//i.test(text),
+            "Kedaluwarsa": /exp|baik digunakan|baik dikomsumsi sebelum/i.test(text)
+        };
 
-// ---------- Proses OCR dan analisis ----------
-document.getElementById('process').addEventListener('click', async () => {
-  const f = document.getElementById('upload').files[0];
-  if (!f) return alert('Pilih gambar terlebih dulu.');
+        // ================================
+        // TAMPILKAN HASIL
+        // ================================
+        let html = "<h3>Hasil Penilaian:</h3><ul>";
 
-  // preprocessing
-  const prep = await preprocessFile(f, 2.2);
-  document.getElementById('imgPreview').innerHTML = `<img src="${prep.dataUrl}" style="max-width:100%;">`;
+        html += `<li><b>Nama Dagang:</b> ${namaDagang}</li>`;
+        html += `<li><b>Nama Produk:</b> ${namaProduk}</li>`;
 
-  document.getElementById('raw').textContent = 'Menjalankan OCR... harap tunggu';
-  document.getElementById('analysis').style.display = 'none';
-  document.getElementById('canva').style.display = 'none';
+        html += "<br>";
 
-  const worker = Tesseract.createWorker({
-    logger: m => console.log(m)
-  });
-  await worker.load();
-  await worker.loadLanguage('eng'); // bisa tambahkan 'ind' jika perlu
-  await worker.initialize('eng');
+        Object.keys(wajib).forEach(key => {
+            if (key === "Nama Dagang" || key === "Nama Produk") return;
 
-  // beri opsi psm yang sesuai (3 = default, 6 = assume a single uniform block of text)
-  await worker.setParameters({'tessedit_pageseg_mode': 6});
+            html += wajib[key]
+                ? `<li>✔ ${key} - ADA</li>`
+                : `<li>❌ ${key} - TIDAK ADA</li>`;
+        });
 
-  const res = await worker.recognize(prep.blob);
-  await worker.terminate();
+        html += "</ul>";
+        document.getElementById('result').innerHTML = html;
 
-  const fullText = res.data && res.data.text ? res.data.text : '';
-  document.getElementById('raw').textContent = fullText || '(tidak ada teks terdeteksi)';
-
-  // gunakan lines (lebih stabil dari split newline)
-  const lines = (res.data.lines || []).map(l => {
-    return {
-      text: (l.text||'').trim(),
-      conf: l.confidence || l.conf || 0,
-      bbox: bboxFrom(l)
-    };
-  }).filter(l => l.text && l.text.length>0);
-
-  // fallback: jika res.data.lines kosong, fallback split text
-  if (lines.length === 0 && fullText.trim().length>0) {
-    const arr = fullText.split('\n').map(s=>s.trim()).filter(s=>s.length>0);
-    for (let i=0;i<arr.length;i++){
-      lines.push({text:arr[i], conf:0, bbox:null});
-    }
-  }
-
-  // 1) Nama Produk => pilih line dengan height terbesar (mengindikasikan ukuran font)
-  let namaProduk = null, produkReason = '';
-  let bestHeight = -1;
-  for (const L of lines) {
-    const b = L.bbox;
-    const h = b ? (b.y1 - b.y0) : 0;
-    // abaikan baris yang kebanyakan angka atau PIRT
-    if (looksLikePirt(L.text) || mostlyDigits(L.text)) continue;
-    if (h > bestHeight) { bestHeight = h; namaProduk = L; }
-  }
-  if (!namaProduk) {
-    // fallback: pilih line terpanjang non-numeric non-pirt
-    namaProduk = lines.filter(l=>!looksLikePirt(l.text) && !mostlyDigits(l.text)).reduce((a,b)=> (b.text.length > (a?.text?.length||0) ? b : a), null);
-    produkReason = 'fallback: terpanjang';
-  } else produkReason = `height=${Math.round(bestHeight)}`;
-
-  // 2) Nama Dagang => baris paling atas (y0 paling kecil) yang mengandung huruf dan bukan PIRT/angka saja
-  let namaDagang = null;
-  let topY = Number.POSITIVE_INFINITY;
-  for (const L of lines) {
-    const b = L.bbox;
-    const y0 = b ? b.y0 : 99999;
-    if (looksLikePirt(L.text) || mostlyDigits(L.text)) continue;
-    if (/[A-Za-z\u00C0-\u017F]/.test(L.text) === false) continue; // pastikan ada huruf
-    if (y0 < topY) { topY = y0; namaDagang = L; }
-  }
-  // fallback: jika tidak ditemukan, ambil line index 0 non-empty yang bukan PIRT
-  if (!namaDagang) {
-    namaDagang = lines.find(l => !looksLikePirt(l.text) && !mostlyDigits(l.text)) || (lines[0]||null);
-  }
-
-  // 3) Produsen => cari kata kunci
-  let produsen = null;
-  for (const L of lines) {
-    if (/diproduksi|produced by|manufactured by|oleh|produsen|distribusi/i.test(L.text)) {
-      produsen = L; break;
-    }
-  }
-  // fallback: cari line mengandung 'PT' atau 'CV' (entitas)
-  if (!produsen) {
-    produsen = lines.find(l => /\b(PT|CV|Persero|Ltd|Pvt|Company)\b/i.test(l.text));
-  }
-
-  // Tampilkan analisis
-  const out = document.getElementById('analysis');
-  out.style.display = 'block';
-  let html = `<h3>Hasil Analisis</h3>`;
-
-  html += `<p><b>Nama Produk (dipilih karena ${produkReason || 'height heuristic'})</b><br><span style="font-size:1.05rem">${namaProduk ? escapeHtml(namaProduk.text) : '<span class="fail">Tidak ditemukan</span>'}</span> <small>conf:${namaProduk?.conf||0}</small></p>`;
-
-  html += `<p><b>Nama Dagang (baris atas yang valid)</b><br><span>${namaDagang ? escapeHtml(namaDagang.text) : '<span class="fail">Tidak ditemukan</span>'}</span> <small>conf:${namaDagang?.conf||0}</small></p>`;
-
-  html += `<p><b>Produsen</b><br>${produsen ? escapeHtml(produsen.text) : '<span class="fail">Tidak ditemukan</span>'} <small>conf:${produsen?.conf||0}</small></p>`;
-
-  html += `<h4>Status kelengkapan</h4><ul>`;
-  function ok(label, item) {
-    const isOk = item && item.text && item.text.trim().length>0 && !looksLikePirt(item.text);
-    html += `<li>${isOk ? '<span class="ok">✔</span>' : '<span class="fail">❌</span>'} ${label}${isOk?` — "${escapeHtml(item.text)}"`:''}</li>`;
-    return isOk;
-  }
-  const c1 = ok('Nama Produk', namaProduk);
-  const c2 = ok('Nama Dagang', namaDagang);
-  const c3 = ok('Produsen', produsen);
-
-  html += `</ul>`;
-
-  if (!c1 || !c2 || !c3) {
-    html += `<p><b class="fail">Beberapa informasi belum terbaca dengan yakin.</b> Anda dapat <a href="https://www.canva.com/design/create" target="_blank">mengedit label di Canva</a> lalu upload ulang gambar yang sudah diperbaiki.</p>`;
-    document.getElementById('canva').style.display = 'inline-block';
-  } else {
-    html += `<p><span class="ok">Semua informasi utama terdeteksi.</span></p>`;
-  }
-
-  // daftar baris terdeteksi untuk debugging
-  html += `<details><summary>Daftar baris terdeteksi (debug)</summary><div style="padding:10px">`;
-  for (const L of lines) {
-    const b = L.bbox;
-    html += `<div style="margin-bottom:8px"><code>${escapeHtml(L.text)}</code> <small> conf:${Math.round(L.conf)} bbox:${b?`${Math.round(b.x0)},${Math.round(b.y0)}-${Math.round(b.x1)},${Math.round(b.y1)}`:'n/a'}</small></div>`;
-  }
-  html += `</div></details>`;
-
-  out.innerHTML = html;
+    });
 });
-
-// utility
-function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 </script>
+
 </body>
 </html>
