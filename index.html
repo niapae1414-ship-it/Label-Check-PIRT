@@ -16,84 +16,73 @@
 <div id="result"></div>
 
 <script>
-document.getElementById('upload').addEventListener('change', function() {
+document.getElementById('upload').addEventListener('change', function () {
     const file = this.files[0];
     if (!file) return;
 
-    Tesseract.recognize(
-        file,
-        'eng',
-        { logger: m => console.log(m) }
-    ).then(({ data: { text } }) => {
+    Tesseract.recognize(file, 'eng', { logger: m => console.log(m) })
+        .then(({ data: { text } }) => {
 
-        // Tampilkan full hasil OCR
-        document.getElementById('output').innerText = text;
+            document.getElementById('output').innerText = text;
 
-        // ================================
-        // PROSES DETEKSI BARIS
-        // ================================
-        const lines = text
-            .split("\n")
-            .map(l => l.trim())
-            .filter(l => l.length > 2);
+            // ─── Analisis teks menjadi baris ────────────────────────────
+            const lines = text.split("\n")
+                              .map(l => l.trim())
+                              .filter(l => l.length > 0);
 
-        let namaDagang = "Tidak ditemukan";
-        let namaProduk = "Tidak ditemukan";
+            // ─────────────────────────────────────────────────────────────
+            //     DETEKSI NAMA DAGANG (BARIS PALING BANYAK HURUF KAPITAL)
+            // ─────────────────────────────────────────────────────────────
+            let namaDagang = "";
+            let maxCaps = 0;
 
-        // --- 1. Nama Dagang = baris paling atas ---
-        if (lines.length > 0) {
-            namaDagang = lines[0];
-        }
+            lines.forEach(line => {
+                const capsCount = (line.match(/[A-Z]/g) || []).length;
+                if (capsCount > maxCaps && line.length < 40) { // biasanya singkat
+                    maxCaps = capsCount;
+                    namaDagang = line;
+                }
+            });
 
-        // --- 2. Nama Produk = baris paling panjang yang bukan angka atau kata kecil ---
-        let kemungkinanProduk = lines.filter(l =>
-            l.length > 5 &&
-            !/komposisi|diproduksi|alamat|netto|p-?irt|exp|kedaluwarsa|bpom/i.test(l) &&
-            !/^\d+$/.test(l)
-        );
+            // ─────────────────────────────────────────────────────────────
+            //     DETEKSI NAMA PRODUK (BARIS YANG BUKAN ALAMAT/PRODUSEN)
+            // ─────────────────────────────────────────────────────────────
+            let namaProduk = "";
+            const blacklist = /(diproduksi|oleh|alamat|komposisi|p-irt|pirt|netto|exp)/i;
 
-        if (kemungkinanProduk.length > 0) {
-            // Ambil baris dengan karakter terbanyak (paling besar biasanya)
-            kemungkinanProduk.sort((a, b) => b.length - a.length);
-            namaProduk = kemungkinanProduk[0];
-        }
+            for (let line of lines) {
+                if (!blacklist.test(line) && line.length > 3) {
+                    namaProduk = line;
+                    break;
+                }
+            }
 
-        // ================================
-        // DETEKSI KOMPONEN WAJIB
-        // ================================
-        const wajib = {
-            "Nama Dagang": namaDagang,
-            "Nama Produk": namaProduk,
-            "Komposisi": /komposisi/i.test(text),
-            "Netto": /netto|berat bersih/i.test(text),
-            "PIRT": /p-irt|pirt|p\.irt/i.test(text),
-            "Produsen": /diproduksi oleh|produsen|oleh/i.test(text),
-            "Alamat Produsen": /alamat produsen|jl//i.test(text),
-            "Kedaluwarsa": /exp|baik digunakan|baik dikomsumsi sebelum/i.test(text)
-        };
+            // ───────────── Daftar komponen label wajib ─────────────
+            const wajib = {
+                "Komposisi": /komposisi/i,
+                "Netto": /netto|berat/i,
+                "PIRT": /p-irt|pirt/i,
+                "Produsen": /diproduksi|produsen|oleh/i,
+                "Kedaluwarsa": /exp|baik digunakan/i
+            };
 
-        // ================================
-        // TAMPILKAN HASIL
-        // ================================
-        let html = "<h3>Hasil Penilaian:</h3><ul>";
+            // ───────────── Hasil Penilaian ─────────────
+            let html = "<h3>HASIL PENILAIAN:</h3><ul>";
 
-        html += `<li><b>Nama Dagang:</b> ${namaDagang}</li>`;
-        html += `<li><b>Nama Produk:</b> ${namaProduk}</li>`;
+            html += `<li>✔ Nama Dagang: <b>${namaDagang || "TIDAK TERDETEKSI"}</b></li>`;
+            html += `<li>✔ Nama Produk: <b>${namaProduk || "TIDAK TERDETEKSI"}</b></li>`;
 
-        html += "<br>";
+            Object.keys(wajib).forEach(key => {
+                if (wajib[key].test(text)) {
+                    html += `<li>✔ ${key} - ADA</li>`;
+                } else {
+                    html += `<li>❌ ${key} - TIDAK ADA</li>`;
+                }
+            });
 
-        Object.keys(wajib).forEach(key => {
-            if (key === "Nama Dagang" || key === "Nama Produk") return;
-
-            html += wajib[key]
-                ? `<li>✔ ${key} - ADA</li>`
-                : `<li>❌ ${key} - TIDAK ADA</li>`;
+            html += "</ul>";
+            document.getElementById('result').innerHTML = html;
         });
-
-        html += "</ul>";
-        document.getElementById('result').innerHTML = html;
-
-    });
 });
 </script>
 
