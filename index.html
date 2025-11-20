@@ -1,109 +1,340 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="id">
 <head>
-<meta charset="UTF-8">
-<title>Label Check PIRT</title>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
-<style>
-    body { font-family: Arial; padding: 20px; }
-    .box { padding: 15px; border: 1px solid #ddd; margin-top: 20px; border-radius: 8px; }
-    .success { color: green; }
-    .fail { color: red; }
-</style>
+  <meta charset="utf-8" />
+  <title>LABELIN-SCAN — Cek Label PIRT</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;max-width:900px;margin:18px auto;padding:12px;}
+    h1{font-size:22px;margin-bottom:6px}
+    p.small{color:#444;margin-top:4px;font-size:13px}
+    #upload{margin:10px 0}
+    #preview{max-width:100%;border:1px solid #ddd;padding:6px;margin:10px 0}
+    #progress{font-size:13px;color:#0066cc}
+    #result ul{line-height:1.6}
+    .ok{color:green}
+    .no{color:#c0392b}
+    .hint{background:#f6f6f6;padding:8px;border-radius:6px;margin:8px 0}
+    button{padding:8px 12px;border-radius:6px;border:0;background:#2563eb;color:white;cursor:pointer}
+    .muted{color:#666;font-size:13px}
+    #canvas{display:none}
+    .controls{display:flex;gap:8px;align-items:center;margin:8px 0}
+    label.small{font-size:13px}
+  </style>
+  <!-- Tesseract.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
 </head>
 <body>
+  <h1>LABELIN-SCAN — Cek Otomatis Kelengkapan Label PIRT</h1>
+  <p class="small">Upload/scan foto label (dari HP). Sistem akan memproses gambar, menjalankan OCR, lalu menilai apakah komponen wajib tertera.</p>
 
-<h2>Cek Label Pangan Otomatis (PIRT)</h2>
-<p>Upload foto label, sistem akan membaca teks dan menilai kelengkapannya.</p>
+  <input id="upload" type="file" accept="image/*" />
+  <div class="controls">
+    <label class="small">Threshold: <input id="threshold" type="range" min="80" max="220" value="140" /></label>
+    <label class="small">Kontras: <input id="contrast" type="range" min="80" max="160" value="120" /></label>
+    <button id="processBtn" disabled>Proses Foto</button>
+    <div id="progress" style="margin-left:8px"></div>
+  </div>
 
-<input type="file" id="upload" accept="image/*"><br><br>
+  <canvas id="canvas"></canvas>
+  <img id="preview" alt="Preview gambar" />
 
-<div class="box">
-    <h3>Teks Hasil OCR:</h3>
-    <pre id="output" style="white-space: pre-wrap;"></pre>
-</div>
+  <div id="rawTextContainer">
+    <h3>Hasil OCR (mentah)</h3>
+    <pre id="rawText" style="white-space:pre-wrap;background:#fafafa;padding:10px;border:1px dashed #ddd;"></pre>
+  </div>
 
-<div id="result" class="box"></div>
+  <div id="result">
+    <h3>Hasil Penilaian:</h3>
+    <div id="analysis" class="hint">Belum ada data.</div>
+    <div style="margin-top:10px">
+      <button id="sendWA" disabled>Kirim ke WhatsApp</button>
+      <span class="muted" style="margin-left:8px">(akan membuka WhatsApp dengan isi hasil)</span>
+    </div>
+  </div>
 
 <script>
-document.getElementById("upload").addEventListener("change", function() {
-    const file = this.files[0];
-    if (!file) return;
+// UTIL: Levenshtein distance (for fuzzy matching)
+function levenshtein(a,b){
+  if(!a||!b) return (a||b) ? Math.max(a.length,b.length) : 0;
+  const m=a.length, n=b.length; const dp = Array(m+1).fill().map(()=>Array(n+1).fill(0));
+  for(let i=0;i<=m;i++) dp[i][0]=i;
+  for(let j=0;j<=n;j++) dp[0][j]=j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      dp[i][j] = Math.min(
+        dp[i-1][j]+1,
+        dp[i][j-1]+1,
+        dp[i-1][j-1] + (a[i-1]===b[j-1] ? 0 : 1)
+      );
+    }
+  }
+  return dp[m][n];
+}
+function fuzzyContains(text, keyword, maxDist=2){
+  if(!text) return false;
+  text = text.toLowerCase();
+  keyword = keyword.toLowerCase();
+  if(text.includes(keyword)) return true;
+  // check each word window
+  const words = text.split(/\s+/).filter(Boolean);
+  for(let i=0;i<words.length;i++){
+    for(let len=1; len<=4 && i+len<=words.length; len++){
+      const s = words.slice(i,i+len).join(' ');
+      if(levenshtein(s, keyword) <= maxDist) return true;
+    }
+  }
+  return false;
+}
 
-    Tesseract.recognize(file, "eng", { logger: m => console.log(m) })
-    .then(({ data: { text } }) => {
-        document.getElementById("output").textContent = text;
+// PREPROCESS IMAGE: draw -> grayscale -> contrast -> threshold
+function preprocessImage(img, threshold=140, contrast=120){
+  const canvas = document.getElementById('canvas');
+  // set reasonable size (limit width)
+  const maxW = 1200;
+  let w = img.naturalWidth, h = img.naturalHeight;
+  if(w>maxW){
+    const ratio = maxW / w;
+    w = Math.round(w * ratio); h = Math.round(h * ratio);
+  }
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
 
-        let lines = text.split("\n")
-                        .map(a => a.trim())
-                        .filter(a => a.length > 0);
+  const im = ctx.getImageData(0,0,w,h);
+  const d = im.data;
+  // grayscale + contrast adjust + threshold
+  const c = contrast/100; // 1.0 normal
+  for(let i=0;i<d.length;i+=4){
+    // grayscale
+    const r=d[i], g=d[i+1], b=d[i+2];
+    let v = 0.299*r + 0.587*g + 0.114*b;
+    // contrast (simple linear)
+    v = (v - 128) * c + 128;
+    // threshold
+    const v2 = v > threshold ? 255 : 0;
+    d[i]=d[i+1]=d[i+2]=v2;
+  }
+  ctx.putImageData(im,0,0);
+  return canvas;
+}
 
-        // ------------------------------
-        // 1. Cari NAMA PRODUK = tulisan terbesar
-        // (biasanya baris terpanjang)
-        // ------------------------------
-        let namaProduk = lines.reduce((a,b) => b.length > a.length ? b : a, "");
+// OCR using Tesseract worker
+async function doOCR(canvas, onProgress){
+  const worker = Tesseract.createWorker({
+    logger: m => {
+      if(onProgress) onProgress(m);
+    }
+  });
+  await worker.load();
+  await worker.loadLanguage('eng+ind');
+  await worker.initialize('eng+ind');
+  // increase psm? use default
+  const { data: { text } } = await worker.recognize(canvas);
+  await worker.terminate();
+  return text;
+}
 
-        // ------------------------------
-        // 2. Cari NAMA DAGANG = baris paling atas
-        // ------------------------------
-        let namaDagang = lines.length > 0 ? lines[0] : "Tidak ditemukan";
+// detection rules
+function analyzeText(text){
+  const out = { raw: text, checks: {} };
+  const t = text.toLowerCase();
 
-        // ------------------------------
-        // 3. Cari produsen berdasarkan kata kunci
-        // ------------------------------
-        let produsen = "Tidak ditemukan";
-        for (let ln of lines) {
-            if (/diproduksi|produced|manufactured|oleh/i.test(ln)) {
-                produsen = ln;
-                break;
-            }
+  // regex patterns (indonesia + english common)
+  const patterns = {
+    komposisi: /\b(komposisi|bahan|ingredients?)\b/i,
+    netto: /\b(netto|berat bersih|net weight|net wt|g|gram|gr)\b/i,
+    pirt: /\b(p[-\s]?irt|no\.?\s?pirt|izin eda?r|izin edd?r)\b/i,
+    produsenAddress: /\b(jl\.|jalan|kel\.|kelurahan|kec\.|kecamatan|kab\.|kabupaten|desa|rt\.|rw\.)\b/i,
+    kadaluarsa: /\b(exp|baik dikonsumsi|baik digunakan|kedaluarsa|kadaluarsa|tgl|tgl\.|expire|use by|best before)\b/i
+  };
+
+  out.checks.komposisi = patterns.komposisi.test(text);
+  out.checks.netto = patterns.netto.test(text);
+  out.checks.pirt = patterns.pirt.test(text);
+  out.checks.produsen = patterns.produsenAddress.test(text);
+  out.checks.kedaluwarsa = patterns.kadaluarsa.test(text);
+
+  // try find product name: heuristics
+  // split lines, find topmost non-empty line with letters and length>2 that is not 'p-irt' etc
+  const lines = text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  let product = null;
+  if(lines.length){
+    // candidate: find longest line among top 5 lines
+    const top5 = lines.slice(0, Math.min(6, lines.length));
+    top5.sort((a,b)=>b.length-a.length);
+    product = top5.find(l => /[A-Za-z0-9]/.test(l) && !patterns.pirt.test(l) && !patterns.produsenAddress.test(l));
+    if(!product){
+      // fallback: whole text fuzzy search for words with capital shapes
+      product = lines[0];
+    }
+  }
+  // further fuzzy detect common product words e.g., 'kue', 'pia', 'biskuit', 'keripik', 'sambal' etc.
+  const productKeywords = ['pia','kue','kue pia','keripik','biskuit','sambal','saus','sirup','bolu','roti','permenn','kue kering'];
+  for(const kw of productKeywords){
+    if(fuzzyContains(text, kw, 2)){ product = product ? product + ' ('+kw+')' : kw; break; }
+  }
+  out.product = product ? product : '';
+
+  // try to extract producer name by finding a short line near address keywords
+  let producer = '';
+  for(let i=0;i<lines.length;i++){
+    if(patterns.produsenAddress.test(lines[i])){
+      // take nearest non-empty line above (up to 2 lines above)
+      producer = lines[i-1] || lines[i];
+      // if that line looks like name (short), append address fragment
+      producer = producer + ' / ' + lines[i];
+      break;
+    }
+  }
+  // if not found, fuzzy match some brand-like strings
+  if(!producer){
+    // try to find any CamelCase or words with multiple small words
+    for(const ln of lines){
+      if(ln.length>3 && ln.split(' ').length<=4 && /[A-Za-z]/.test(ln)){
+        // ignore if looks like ingredient list (contains comma separated many words)
+        if((ln.match(/,/g)||[]).length < 2){
+          producer = ln; break;
         }
+      }
+    }
+  }
+  out.producer = producer;
 
-        // ------------------------------
-        // 4. Tampilkan hasil + cek kelengkapan
-        // ------------------------------
-        let html = `<h3>Hasil Analisis Label</h3>`;
-        html += `<p><b>Nama Produk:</b> ${namaProduk || "Tidak ditemukan"}</p>`;
-        html += `<p><b>Nama Dagang:</b> ${namaDagang || "Tidak ditemukan"}</p>`;
-        html += `<p><b>Produsen:</b> ${produsen}</p>`;
+  // compute overall completeness score
+  const required = ['product','komposisi','netto','produsen','pirt','kedaluwarsa'];
+  let score = 0, total=reqired.length;
+  if(out.product) score++;
+  if(out.checks.komposisi) score++;
+  if(out.checks.netto) score++;
+  if(out.producer) score++;
+  if(out.checks.pirt) score++;
+  if(out.checks.kedaluwarsa) score++;
 
-        html += `<h3>Status Kelengkapan</h3><ul>`;
+  out.score = score;
+  out.total = total;
+  out.summary = (score===total) ? 'LENGKAP' : (score>=Math.ceil(total*0.7) ? 'SEMI LENGKAP' : 'TIDAK LENGKAP');
+  return out;
+}
 
-        function cek(label, value) {
-            if (!value || value === "Tidak ditemukan") {
-                html += `<li class="fail">❌ ${label} belum ada</li>`;
-                return false;
-            } else {
-                html += `<li class="success">✔ ${label} lengkap</li>`;
-                return true;
-            }
-        }
+/* MAIN UI */
+const upload = document.getElementById('upload');
+const preview = document.getElementById('preview');
+const rawTextEl = document.getElementById('rawText');
+const processBtn = document.getElementById('processBtn');
+const progressEl = document.getElementById('progress');
+const thresholdEl = document.getElementById('threshold');
+const contrastEl = document.getElementById('contrast');
+const analysisEl = document.getElementById('analysis');
+const sendWA = document.getElementById('sendWA');
+let lastAnalysis = null;
+let lastPhone = ''; // optional if you want to capture
 
-        let c1 = cek("Nama Produk", namaProduk);
-        let c2 = cek("Nama Dagang", namaDagang);
-        let c3 = cek("Produsen", produsen);
+upload.addEventListener('change', ()=>{
+  const f = upload.files[0];
+  if(!f) return;
+  const url = URL.createObjectURL(f);
+  preview.src = url;
+  processBtn.disabled = false;
+  rawTextEl.textContent = '';
+  analysisEl.innerHTML = 'Siap memproses. Klik "Proses Foto".';
+  sendWA.disabled = true;
+});
 
-        html += `</ul>`;
+processBtn.addEventListener('click', async ()=>{
+  if(!upload.files[0]) return alert('Pilih file dulu');
+  processBtn.disabled = true;
+  progressEl.textContent = 'Menyiapkan gambar...';
+  await new Promise(r=>setTimeout(r,200));
 
-        // ------------------------------
-        // 5. Jika belum lengkap → arahkan ke Canva
-        // ------------------------------
-        if (!c1 || !c2 || !c3) {
-            html += `
-                <div style="margin-top:20px;">
-                    <a href="https://www.canva.com/design/create" 
-                       target="_blank" 
-                       style="background:#ff007b;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;">
-                       Edit Label di Canva
-                    </a>
-                </div>`;
-        }
+  // prepare image element for processing
+  const img = new Image();
+  img.src = URL.createObjectURL(upload.files[0]);
+  img.onload = async function(){
+    // preproc
+    progressEl.textContent = 'Memproses gambar (preprocessing)...';
+    const thr = parseInt(thresholdEl.value,10);
+    const cont = parseInt(contrastEl.value,10);
+    const canvas = preprocessImage(img, thr, cont);
 
-        document.getElementById("result").innerHTML = html;
-    });
+    // show preprocessed preview (for debug) — convert canvas to data URL
+    preview.src = canvas.toDataURL('image/jpeg');
+
+    progressEl.textContent = 'Menjalankan OCR (sedang berjalan)...';
+    try{
+      const ocrText = await doOCR(canvas, m => {
+        if(m && m.status) progressEl.textContent = `OCR: ${m.status} ${m.progress? Math.round(m.progress*100)+'%':''}`;
+      });
+      rawTextEl.textContent = ocrText.trim() || '[tidak ada teks terdeteksi]';
+      progressEl.textContent = 'Menganalisis hasil OCR...';
+      const analysis = analyzeText(ocrText);
+      lastAnalysis = analysis; // store
+      renderAnalysis(analysis);
+      sendWA.disabled = false;
+      progressEl.textContent = 'Selesai';
+    }catch(err){
+      console.error(err);
+      progressEl.textContent = 'Terjadi error saat OCR. Coba foto lebih jelas atau ubah threshold/contrast.';
+      analysisEl.innerHTML = '<div class="no">Error OCR — coba ulang dengan foto berbeda.</div>';
+    } finally {
+      processBtn.disabled = false;
+    }
+  };
+  img.onerror = ()=>{ alert('Gagal memuat gambar. Coba file JPG/PNG yang lain.'); processBtn.disabled=false; progressEl.textContent='';};
+});
+
+function renderAnalysis(a){
+  let html = `<div><strong>Status:</strong> <span style="font-weight:700">${a.summary}</span> — Skor: ${a.score}/${a.total}</div>`;
+  html += '<ul>';
+  // product
+  if(a.product) html += `<li class="ok">✔ Nama Produk: <strong>${escapeHtml(a.product)}</strong></li>`; else html += `<li class="no">❌ Nama Produk - TIDAK TERDETEKSI</li>`;
+  // komposisi
+  html += a.checks.komposisi ? `<li class="ok">✔ Komposisi - ADA</li>` : `<li class="no">❌ Komposisi - TIDAK ADA</li>`;
+  // netto
+  html += a.checks.netto ? `<li class="ok">✔ Netto - ADA</li>` : `<li class="no">❌ Netto - TIDAK ADA</li>`;
+  // pirt
+  html += a.checks.pirt ? `<li class="ok">✔ PIRT - ADA</li>` : `<li class="no">❌ PIRT - TIDAK ADA</li>`;
+  // produsen
+  if(a.producer) html += `<li class="ok">✔ Produsen/Alamat: <strong>${escapeHtml(a.producer)}</strong></li>`;
+  else html += `<li class="no">❌ Produsen/Alamat - TIDAK TERDETEKSI</li>`;
+  // kedaluwarsa
+  html += a.checks.kedaluwarsa ? `<li class="ok">✔ Kedaluwarsa - ADA</li>` : `<li class="no">❌ Kedaluwarsa - TIDAK ADA</li>`;
+  html += '</ul>';
+  // saran
+  html += '<div class="hint"><strong>Saran Perbaikan:</strong><ul>';
+  if(!a.product) html += '<li>Perjelas nama produk di bagian atas label (font tebal/kontras tinggi) atau tambahkan teks nama produk dekat gambar.</li>';
+  if(!a.checks.komposisi) html += '<li>Tambahkan daftar komposisi (kata "Komposisi:" diikuti bahan utama).</li>';
+  if(!a.checks.netto) html += '<li>Cantumkan netto / berat bersih (mis. Netto: 100 g).</li>';
+  if(!a.checks.pirt) html += '<li>Cantumkan nomor P-IRT atau nomor izin edar jika tersedia.</li>';
+  if(!a.producer) html += '<li>Cantumkan nama & alamat produsen (format: Nama Usaha, Jl. ..., Kel., Kec., Kab.).</li>';
+  if(!a.checks.kedaluwarsa) html += '<li>Tambahkan tanggal kedaluwarsa / '+
+    'keterangan "Baik dikonsumsi sebelum:"</li>';
+  html += '</ul></div>';
+  analysisEl.innerHTML = html;
+}
+
+// escape for safe HTML injection
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[c]);
+}
+
+// WhatsApp send
+sendWA.addEventListener('click', ()=>{
+  if(!lastAnalysis) return alert('Tidak ada hasil analyis.');
+  const nomorAdmin = prompt('Masukkan nomor WhatsApp penerima (contoh 6281234567890):', '628' ); // optional prompt
+  if(!nomorAdmin) return;
+  const a = lastAnalysis;
+  let msg = `Hasil Cek Label:\\nStatus: ${a.summary} (${a.score}/${a.total})\\n`;
+  msg += `Nama Produk: ${a.product || 'Tidak terdeteksi'}\\n`;
+  msg += `Komposisi: ${a.checks.komposisi ? 'Ada' : 'Tidak ada'}\\n`;
+  msg += `Netto: ${a.checks.netto ? 'Ada' : 'Tidak ada'}\\n`;
+  msg += `PIRT: ${a.checks.pirt ? 'Ada' : 'Tidak ada'}\\n`;
+  msg += `Produsen: ${a.producer || 'Tidak terdeteksi'}\\n`;
+  msg += `Kedaluwarsa: ${a.checks.kedaluwarsa ? 'Ada' : 'Tidak ada'}\\n`;
+  msg += `\\nSaran: ${a.score===a.total ? 'Label lengkap' : 'Perbaiki item yang diberi tanda ❌ sesuai saran.'}\\n`;
+  const url = `https://wa.me/${nomorAdmin}?text=${encodeURIComponent(msg)}`;
+  window.open(url, '_blank');
 });
 </script>
-
 </body>
 </html>
