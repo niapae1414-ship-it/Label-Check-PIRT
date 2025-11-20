@@ -1,107 +1,109 @@
-import cv2
-import easyocr
-import numpy as np
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Label Check PIRT</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<style>
+    body { font-family: Arial; padding: 20px; }
+    .box { padding: 15px; border: 1px solid #ddd; margin-top: 20px; border-radius: 8px; }
+    .success { color: green; }
+    .fail { color: red; }
+</style>
+</head>
+<body>
 
-# -----------------------------------------
-# KONFIGURASI
-# -----------------------------------------
-CANVA_EDIT_LINK = "https://www.canva.com/design/DAFxxxxx/edit"   # ubah sesuai kebutuhan
-BAHASA = ['id', 'en']  # ISO language code EasyOCR
+<h2>Cek Label Pangan Otomatis (PIRT)</h2>
+<p>Upload foto label, sistem akan membaca teks dan menilai kelengkapannya.</p>
 
-reader = easyocr.Reader(BAHASA)
+<input type="file" id="upload" accept="image/*"><br><br>
 
-# -----------------------------------------
-# FUNGSI: Ekstrak tulisan terbesar (Nama Produk)
-# -----------------------------------------
-def get_largest_text(boxes):
-    largest = None
-    largest_area = 0
+<div class="box">
+    <h3>Teks Hasil OCR:</h3>
+    <pre id="output" style="white-space: pre-wrap;"></pre>
+</div>
 
-    for (bbox, text, prob) in boxes:
-        # hitung ukuran bounding box
-        pts = np.array(bbox)
-        x, y, w, h = cv2.boundingRect(pts)
-        area = w * h
+<div id="result" class="box"></div>
 
-        # pilih area terbesar dengan confidence bagus
-        if area > largest_area and prob > 0.4:
-            largest_area = area
-            largest = text
+<script>
+document.getElementById("upload").addEventListener("change", function() {
+    const file = this.files[0];
+    if (!file) return;
 
-    return largest
+    Tesseract.recognize(file, "eng", { logger: m => console.log(m) })
+    .then(({ data: { text } }) => {
+        document.getElementById("output").textContent = text;
 
-# -----------------------------------------
-# FUNGSI: Ambil tulisan paling atas (Nama Dagang)
-# -----------------------------------------
-def get_topmost_text(boxes):
-    top_text = None
-    top_y = 99999
+        let lines = text.split("\n")
+                        .map(a => a.trim())
+                        .filter(a => a.length > 0);
 
-    for (bbox, text, prob) in boxes:
-        pts = np.array(bbox)
-        x, y, w, h = cv2.boundingRect(pts)
+        // ------------------------------
+        // 1. Cari NAMA PRODUK = tulisan terbesar
+        // (biasanya baris terpanjang)
+        // ------------------------------
+        let namaProduk = lines.reduce((a,b) => b.length > a.length ? b : a, "");
 
-        if y < top_y and prob > 0.4:
-            top_y = y
-            top_text = text
+        // ------------------------------
+        // 2. Cari NAMA DAGANG = baris paling atas
+        // ------------------------------
+        let namaDagang = lines.length > 0 ? lines[0] : "Tidak ditemukan";
 
-    return top_text
+        // ------------------------------
+        // 3. Cari produsen berdasarkan kata kunci
+        // ------------------------------
+        let produsen = "Tidak ditemukan";
+        for (let ln of lines) {
+            if (/diproduksi|produced|manufactured|oleh/i.test(ln)) {
+                produsen = ln;
+                break;
+            }
+        }
 
-# -----------------------------------------
-# FUNGSI: Deteksi Produsen berdasarkan kata kunci
-# -----------------------------------------
-def detect_produsen(texts):
-    keywords = ["diproduksi oleh", "produced by", "produsen", "manufactured by"]
+        // ------------------------------
+        // 4. Tampilkan hasil + cek kelengkapan
+        // ------------------------------
+        let html = `<h3>Hasil Analisis Label</h3>`;
+        html += `<p><b>Nama Produk:</b> ${namaProduk || "Tidak ditemukan"}</p>`;
+        html += `<p><b>Nama Dagang:</b> ${namaDagang || "Tidak ditemukan"}</p>`;
+        html += `<p><b>Produsen:</b> ${produsen}</p>`;
 
-    for t in texts:
-        low = t.lower()
-        for k in keywords:
-            if k in low:
-                return t
-    return None
+        html += `<h3>Status Kelengkapan</h3><ul>`;
 
-# -----------------------------------------
-# FUNGSI UTAMA
-# -----------------------------------------
-def process_label(image_path):
-    print(f"Memproses gambar: {image_path}")
+        function cek(label, value) {
+            if (!value || value === "Tidak ditemukan") {
+                html += `<li class="fail">❌ ${label} belum ada</li>`;
+                return false;
+            } else {
+                html += `<li class="success">✔ ${label} lengkap</li>`;
+                return true;
+            }
+        }
 
-    results = reader.readtext(image_path)
+        let c1 = cek("Nama Produk", namaProduk);
+        let c2 = cek("Nama Dagang", namaDagang);
+        let c3 = cek("Produsen", produsen);
 
-    # Simpan semua teks
-    all_texts = [t[1] for t in results]
+        html += `</ul>`;
 
-    # Ekstraksi nama produk
-    nama_produk = get_largest_text(results)
+        // ------------------------------
+        // 5. Jika belum lengkap → arahkan ke Canva
+        // ------------------------------
+        if (!c1 || !c2 || !c3) {
+            html += `
+                <div style="margin-top:20px;">
+                    <a href="https://www.canva.com/design/create" 
+                       target="_blank" 
+                       style="background:#ff007b;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;">
+                       Edit Label di Canva
+                    </a>
+                </div>`;
+        }
 
-    # Ekstraksi nama dagang
-    nama_dagang = get_topmost_text(results)
+        document.getElementById("result").innerHTML = html;
+    });
+});
+</script>
 
-    # Ekstraksi nama produsen
-    nama_produsen = detect_produsen(all_texts)
-
-    # -----------------------------------------
-    # OUTPUT
-    # -----------------------------------------
-    print("\n=== HASIL PEMBACAAN LABEL ===")
-    print(f"Nama Produk  : {nama_produk}")
-    print(f"Nama Dagang  : {nama_dagang}")
-    print(f"Produsen     : {nama_produsen}")
-
-    # Jika ada yang tidak terbaca → arahkan ke Canva
-    if not nama_produk or not nama_dagang or not nama_produsen:
-        print("\n⚠️  Ada informasi yang tidak terbaca lengkap.")
-        print(f"➡️  Silakan edit label Anda melalui Canva: {CANVA_EDIT_LINK}\n")
-
-    return {
-        "nama_produk": nama_produk,
-        "nama_dagang": nama_dagang,
-        "nama_produsen": nama_produsen
-    }
-
-
-# -----------------------------------------
-# CONTOH PEMANGGILAN
-# -----------------------------------------
-if __name__ == "__main__":
-    process_label("contoh_label_produk.jpg")
+</body>
+</html>
