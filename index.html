@@ -1,0 +1,107 @@
+import cv2
+import easyocr
+import numpy as np
+
+# -----------------------------------------
+# KONFIGURASI
+# -----------------------------------------
+CANVA_EDIT_LINK = "https://www.canva.com/design/DAFxxxxx/edit"   # ubah sesuai kebutuhan
+BAHASA = ['id', 'en']  # ISO language code EasyOCR
+
+reader = easyocr.Reader(BAHASA)
+
+# -----------------------------------------
+# FUNGSI: Ekstrak tulisan terbesar (Nama Produk)
+# -----------------------------------------
+def get_largest_text(boxes):
+    largest = None
+    largest_area = 0
+
+    for (bbox, text, prob) in boxes:
+        # hitung ukuran bounding box
+        pts = np.array(bbox)
+        x, y, w, h = cv2.boundingRect(pts)
+        area = w * h
+
+        # pilih area terbesar dengan confidence bagus
+        if area > largest_area and prob > 0.4:
+            largest_area = area
+            largest = text
+
+    return largest
+
+# -----------------------------------------
+# FUNGSI: Ambil tulisan paling atas (Nama Dagang)
+# -----------------------------------------
+def get_topmost_text(boxes):
+    top_text = None
+    top_y = 99999
+
+    for (bbox, text, prob) in boxes:
+        pts = np.array(bbox)
+        x, y, w, h = cv2.boundingRect(pts)
+
+        if y < top_y and prob > 0.4:
+            top_y = y
+            top_text = text
+
+    return top_text
+
+# -----------------------------------------
+# FUNGSI: Deteksi Produsen berdasarkan kata kunci
+# -----------------------------------------
+def detect_produsen(texts):
+    keywords = ["diproduksi oleh", "produced by", "produsen", "manufactured by"]
+
+    for t in texts:
+        low = t.lower()
+        for k in keywords:
+            if k in low:
+                return t
+    return None
+
+# -----------------------------------------
+# FUNGSI UTAMA
+# -----------------------------------------
+def process_label(image_path):
+    print(f"Memproses gambar: {image_path}")
+
+    results = reader.readtext(image_path)
+
+    # Simpan semua teks
+    all_texts = [t[1] for t in results]
+
+    # Ekstraksi nama produk
+    nama_produk = get_largest_text(results)
+
+    # Ekstraksi nama dagang
+    nama_dagang = get_topmost_text(results)
+
+    # Ekstraksi nama produsen
+    nama_produsen = detect_produsen(all_texts)
+
+    # -----------------------------------------
+    # OUTPUT
+    # -----------------------------------------
+    print("\n=== HASIL PEMBACAAN LABEL ===")
+    print(f"Nama Produk  : {nama_produk}")
+    print(f"Nama Dagang  : {nama_dagang}")
+    print(f"Produsen     : {nama_produsen}")
+
+    # Jika ada yang tidak terbaca → arahkan ke Canva
+    if not nama_produk or not nama_dagang or not nama_produsen:
+        print("\n⚠️  Ada informasi yang tidak terbaca lengkap.")
+        print(f"➡️  Silakan edit label Anda melalui Canva: {CANVA_EDIT_LINK}\n")
+
+    return {
+        "nama_produk": nama_produk,
+        "nama_dagang": nama_dagang,
+        "nama_produsen": nama_produsen
+    }
+
+
+# -----------------------------------------
+# CONTOH PEMANGGILAN
+# -----------------------------------------
+if __name__ == "__main__":
+    process_label("contoh_label_produk.jpg")
